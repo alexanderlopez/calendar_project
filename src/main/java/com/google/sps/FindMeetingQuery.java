@@ -88,9 +88,6 @@ public final class FindMeetingQuery {
             timeList.remove(current);
             timeList.add(updated);
         }
-        else {
-            System.out.println("This is wrong.");
-        }
     }
 
     private TimeRange intersect() {
