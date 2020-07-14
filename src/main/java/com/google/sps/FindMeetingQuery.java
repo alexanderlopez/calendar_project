@@ -16,81 +16,72 @@ package com.google.sps;
 
 import java.util.Collection;
 import java.util.ArrayList;
+import java.util.PriorityQueue;
+import java.util.Comparator;
 
 public final class FindMeetingQuery {
-    public Collection<TimeRange> query(Collection<Event> events, MeetingRequest request) {
-        ArrayList<TimeRange> returnList = new ArrayList<TimeRange>();
-        returnList.add(TimeRange.WHOLE_DAY);
 
-        trimList(returnList, request.getAttendees(), events);
+    ArrayList<TimeRange> queryResult;
 
-        removeSmallSlots(returnList, request.getDuration());
+    public Collection<TimeRange> query(Collection<Event> events,
+            MeetingRequest request) {
+        queryResult = new ArrayList<TimeRange>();
 
-        return returnList;
-    }
+        TimeRange currentRange = TimeRange.WHOLE_DAY;
 
-    private void removeSmallSlots(ArrayList<TimeRange> timeList, long duration) {
-        for (TimeRange timeSlot : (ArrayList<TimeRange>) timeList.clone()) {
-            if (timeSlot.duration() < duration) {
-                timeList.remove(timeSlot);
+        PriorityQueue<Event> eventQueue =
+                new PriorityQueue<Event>(new Comparator<Event>() {
+            @Override
+            public int compare(Event e1, Event e2) {
+                return TimeRange.ORDER_BY_START.compare(
+                        e1.getWhen(), e2.getWhen());
+            }
+        });
+
+        for (Event event : events) {
+            if (eventIntersectsGuestlist(event, request.getAttendees())) {
+                eventQueue.add(event);
             }
         }
-    }
 
-    private void trimList(ArrayList<TimeRange> timeList, Collection<String> participants,
-                          Collection<Event> events) {
-        for (Event event : events) {
-            boolean trivialIntersection = true;
-            for(String participant : participants) {
-                if (event.getAttendees().contains(participant)) {
-                    trivialIntersection = false;
-                }
-            }
+        while (!eventQueue.isEmpty()) {
+            TimeRange currentEvent = eventQueue.poll().getWhen();
 
-            if (trivialIntersection) {
+            if (!currentEvent.overlaps(currentRange)) {
                 continue;
             }
 
-            TimeRange eventRange = event.getWhen();
-            for (TimeRange timeSlot : (ArrayList<TimeRange>) timeList.clone()) {
-                if(!timeSlot.overlaps(eventRange)) {
-                    continue;
-                }
+            TimeRange addRange = TimeRange.fromStartEnd(currentRange.start(),
+                                 currentEvent.start(), false);
 
-                splitRange(timeList, timeSlot, eventRange);
+            if (addRange.duration() >= request.getDuration()) {
+                queryResult.add(addRange);
+            }
+
+            currentRange = TimeRange.fromStartEnd(currentEvent.end(),
+                           currentRange.end(), false);
+            if (currentRange.duration() <= 0) {
+                break;
             }
         }
+
+        if (currentRange.duration() >= request.getDuration()) {
+            queryResult.add(currentRange);
+        }
+
+        return queryResult;
     }
 
-    private void splitRange(ArrayList<TimeRange> timeList, TimeRange current, TimeRange event) {
-        if (current.contains(event)) {
-            TimeRange before = TimeRange.fromStartEnd(current.start(), event.start(), false);
-            TimeRange after = TimeRange.fromStartEnd(event.end(), current.end(), false);
+    private boolean eventIntersectsGuestlist(Event event,
+            Collection<String> guestList) {
+        Collection<String> eventGuestlist = event.getAttendees();
 
-            timeList.remove(current);
-            if (before.duration() > 0) {
-                timeList.add(before);
-            }
-            if (after.duration() > 0) {
-                timeList.add(after);
+        for (String name : guestList) {
+            if (eventGuestlist.contains(name)) {
+                return true;
             }
         }
-        else if (event.contains(current)) {
-            timeList.remove(current);
-        }
-        else if (event.contains(current.start())) {
-            TimeRange updated = TimeRange.fromStartEnd(event.end(), current.end(), false);
-            timeList.remove(current);
-            timeList.add(updated);
-        }
-        else if (current.contains(event.start())) {
-            TimeRange updated = TimeRange.fromStartEnd(current.start(), event.start(), false);
-            timeList.remove(current);
-            timeList.add(updated);
-        }
-    }
 
-    private TimeRange intersect() {
-        return null;
+        return false;
     }
 }
