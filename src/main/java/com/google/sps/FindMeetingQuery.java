@@ -15,9 +15,73 @@
 package com.google.sps;
 
 import java.util.Collection;
+import java.util.ArrayList;
+import java.util.PriorityQueue;
+import java.util.Comparator;
 
 public final class FindMeetingQuery {
-  public Collection<TimeRange> query(Collection<Event> events, MeetingRequest request) {
-    throw new UnsupportedOperationException("TODO: Implement this method.");
-  }
+
+    ArrayList<TimeRange> queryResult;
+
+    public Collection<TimeRange> query(Collection<Event> events,
+            MeetingRequest request) {
+        queryResult = new ArrayList<TimeRange>();
+
+        TimeRange currentRange = TimeRange.WHOLE_DAY;
+
+        PriorityQueue<Event> eventQueue =
+                new PriorityQueue<Event>(new Comparator<Event>() {
+            @Override
+            public int compare(Event e1, Event e2) {
+                return TimeRange.ORDER_BY_START.compare(
+                        e1.getWhen(), e2.getWhen());
+            }
+        });
+
+        for (Event event : events) {
+            if (eventIntersectsGuestlist(event, request.getAttendees())) {
+                eventQueue.add(event);
+            }
+        }
+
+        while (!eventQueue.isEmpty()) {
+            TimeRange currentEvent = eventQueue.poll().getWhen();
+
+            if (!currentEvent.overlaps(currentRange)) {
+                continue;
+            }
+
+            TimeRange addRange = TimeRange.fromStartEnd(currentRange.start(),
+                                 currentEvent.start(), false);
+
+            if (addRange.duration() >= request.getDuration()) {
+                queryResult.add(addRange);
+            }
+
+            currentRange = TimeRange.fromStartEnd(currentEvent.end(),
+                           currentRange.end(), false);
+            if (currentRange.duration() <= 0) {
+                break;
+            }
+        }
+
+        if (currentRange.duration() >= request.getDuration()) {
+            queryResult.add(currentRange);
+        }
+
+        return queryResult;
+    }
+
+    private boolean eventIntersectsGuestlist(Event event,
+            Collection<String> guestList) {
+        Collection<String> eventGuestlist = event.getAttendees();
+
+        for (String name : guestList) {
+            if (eventGuestlist.contains(name)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
 }
