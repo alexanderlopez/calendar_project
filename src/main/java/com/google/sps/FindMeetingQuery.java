@@ -18,8 +18,8 @@ import java.util.Collection;
 import java.util.ArrayList;
 import java.util.PriorityQueue;
 import java.util.Comparator;
-import java.util.Iterator;
 import java.util.HashMap;
+import java.util.HashSet;
 
 public final class FindMeetingQuery {
 
@@ -101,10 +101,19 @@ public final class FindMeetingQuery {
         if (finalList == null) {
             return (new ArrayList<TimeRange>());
         }
-
         finalList.sort(TimeRange.ORDER_BY_START);
 
-        return finalList;
+        ArrayList<TimeRange> removeDuplicates = new ArrayList<TimeRange>();
+
+        TimeRange lastAdded = null;
+        for (TimeRange timeRange : finalList) {
+            if (!timeRange.equals(lastAdded)) {
+                removeDuplicates.add(timeRange);
+                lastAdded = timeRange;
+            }
+        }
+
+        return removeDuplicates;
     }
 
     private ArrayList<TimeRange> processTimeRanges(long duration) {
