@@ -19,198 +19,309 @@ import java.util.ArrayList;
 import java.util.PriorityQueue;
 import java.util.Comparator;
 import java.util.Iterator;
+import java.util.HashMap;
 
 public final class FindMeetingQuery {
 
-    private ArrayList<TimeRange> queryResult;
-    private PriorityQueue<Event> guestEventQueue;
-    private PriorityQueue<Event> eventQueue;
+    ArrayList<EventPoint> pointList;
+    ArrayList<Range> partitionedRanges;
+    HashMap<String, Integer> optionalAttendees;
+    HashMap<String, Integer> mandatoryAttendees;
+    PriorityQueue<Range> rangeQueue;
+
+    static final Comparator<Range> MAX_ATTENDEE_ORDER =
+        (Range e1, Range e2) ->
+        {
+            if (!e1.mandatoryAvailable && !e2.mandatoryAvailable) {
+                return 0;
+            }
+            else if (!e1.mandatoryAvailable || !e2.mandatoryAvailable) {
+                return (e1.mandatoryAvailable ? -1 : 1);
+            }
+            else {
+                return Integer.compare(e2.attendees.size(),
+                    e1.attendees.size());
+            }
+        };
+
+    static final Comparator<EventPoint> CHRONOLOGICAL_ORDER =
+        (EventPoint e1, EventPoint e2) ->
+        { return Long.compare(e1.time, e2.time); };
 
     public Collection<TimeRange> query(Collection<Event> events,
             MeetingRequest request) {
-        queryResult = new ArrayList<TimeRange>();
-        eventQueue =
-            new PriorityQueue<Event>((Event e1, Event e2) ->
-                TimeRange.ORDER_BY_START.compare(e1.getWhen(), e2.getWhen()));
-        guestEventQueue =
-            new PriorityQueue<Event>((Event e1, Event e2) ->
-                TimeRange.ORDER_BY_START.compare(e1.getWhen(), e2.getWhen()));
+        pointList = new ArrayList<EventPoint>();
+        partitionedRanges = new ArrayList<Range>();
+        rangeQueue = new PriorityQueue<Range>(MAX_ATTENDEE_ORDER);
 
-        TimeRange currentRange = TimeRange.WHOLE_DAY;
-
-        checkEvents(events, request.getAttendees(),
+        preprocessEvents(events, request.getAttendees(),
             request.getOptionalAttendees());
 
-        while (!eventQueue.isEmpty()) {
-            TimeRange currentEventTimeRange = eventQueue.poll().getWhen();
+        initializeHashmap(request.getAttendees(),
+            request.getOptionalAttendees());
 
-            if (!currentEventTimeRange.overlaps(currentRange)) {
-                continue;
+        EventPoint previousPoint = new EventPoint(TimeRange.START_OF_DAY,
+            EventPoint.POINT_TYPE_START);
+
+        for (int i = 0; i < pointList.size(); i++) {
+            EventPoint currentPoint = pointList.get(i);
+
+            boolean addToMap = false;
+            if (currentPoint.pointType == EventPoint.POINT_TYPE_START) {
+                addToMap = true;
+            }
+            else if (currentPoint.pointType == EventPoint.POINT_TYPE_END) {
+                addToMap = false;
             }
 
-            TimeRange addRange = TimeRange.fromStartEnd(currentRange.start(),
-                                 currentEventTimeRange.start(), false);
+            TimeRange currentRange = TimeRange.fromStartEnd(
+                previousPoint.time, currentPoint.time, false);
 
-            if (addRange.duration() >= request.getDuration()) {
-                queryResult.add(addRange);
+            if (currentRange.duration() > 0) {
+                Collection<String> freeAttendees = getFreeAttendees(
+                    request.getAttendees(), request.getOptionalAttendees());
+                boolean mandatoryAvailable = !(freeAttendees == null);
+
+                Range range = new Range(mandatoryAvailable, currentRange,
+                    freeAttendees, partitionedRanges.size());
+                partitionedRanges.add(range);
+                rangeQueue.add(range);
             }
 
-            currentRange = TimeRange.fromStartEnd(currentEventTimeRange.end(),
-                           currentRange.end(), false);
-            if (currentRange.duration() <= 0) {
+            if (currentPoint.event == null) {
+                break;
+            }
+
+            updateAttendeeCounter(currentPoint.event, addToMap);
+            previousPoint = currentPoint;
+        }
+
+        ArrayList<TimeRange> finalList =
+            processTimeRanges(request.getDuration());
+        if (finalList == null) {
+            return (new ArrayList<TimeRange>());
+        }
+
+        finalList.sort(TimeRange.ORDER_BY_START);
+
+        return finalList;
+    }
+
+    private ArrayList<TimeRange> processTimeRanges(long duration) {
+
+        ArrayList<TimeRange> returnRange = new ArrayList<TimeRange>();
+        Collection<String> workingAttendeeList = null;
+
+        while (!rangeQueue.isEmpty()) {
+            Range currentRange = rangeQueue.poll();
+
+            if (!currentRange.mandatoryAvailable) {
+                return null;
+            }
+
+            int startTime = cascadeLeft(currentRange);
+            int endTime = cascadeRight(currentRange);
+
+            TimeRange expandedTimeRange = TimeRange.fromStartEnd(startTime,
+                endTime, false);
+
+            if (expandedTimeRange.duration() >= duration) {
+                workingAttendeeList = currentRange.attendees;
+                returnRange.add(expandedTimeRange);
                 break;
             }
         }
 
-        if (currentRange.duration() >= request.getDuration()) {
-            queryResult.add(currentRange);
+        if (workingAttendeeList == null) {
+            return null;
         }
 
-        Collection<TimeRange> optionalCheck = considerOptional(
-            request.getDuration());
+        while (!rangeQueue.isEmpty()) {
+            // Add remaining events that fit the list given
+            Range currentRange = rangeQueue.poll();
 
-        if (optionalCheck.isEmpty()) {
-            return queryResult;
-        }
+            if (!currentRange.mandatoryAvailable) {
+                break;
+            }
 
-        return optionalCheck;
-    }
+            if (currentRange.attendees.size() < workingAttendeeList.size()) {
+                break;
+            }
 
-    private Collection<TimeRange> considerOptional(long duration) {
-        ArrayList<TimeRange> optionalResult = new ArrayList<TimeRange>();
+            if (currentRange.attendees.containsAll(workingAttendeeList)) {
+                int startTime = cascadeLeft(currentRange);
+                int endTime = cascadeRight(currentRange);
 
-        if (queryResult.isEmpty()) {
-            return optionalResult;
-        }
+                TimeRange expandedTimeRange = TimeRange.fromStartEnd(startTime,
+                    endTime, false);
 
-        if (guestEventQueue.isEmpty()) {
-            return optionalResult;
-        }
-
-        Iterator<TimeRange> availableRangeIterator = queryResult.iterator();
-        TimeRange workingTimeRange = availableRangeIterator.next();
-        TimeRange currentEventTimeRange = guestEventQueue.poll().getWhen();
-
-        eventIteration:
-        while (true) {
-
-            if (workingTimeRange.start() >= currentEventTimeRange.end()) {
-                if (guestEventQueue.isEmpty()) {
-                    break eventIteration;
+                if (expandedTimeRange.duration() >= duration) {
+                    returnRange.add(expandedTimeRange);
                 }
-
-                currentEventTimeRange = guestEventQueue.poll().getWhen();
-            }
-
-            while (!currentEventTimeRange.overlaps(workingTimeRange)
-                    && workingTimeRange.start() < currentEventTimeRange.end()) {
-                if (!availableRangeIterator.hasNext()) {
-                    // Might be able too immediately return here.
-                    break eventIteration;
-                }
-
-                optionalResult.add(workingTimeRange);
-                workingTimeRange = availableRangeIterator.next();
-            }
-
-            if (currentEventTimeRange.overlaps(workingTimeRange)) {
-                TimeRange[] rangeCut = handleOverlap(
-                    currentEventTimeRange, workingTimeRange, duration);
-
-                if (rangeCut[0] != null) {
-                    optionalResult.add(rangeCut[0]);
-                }
-                if (rangeCut[1] != null) {
-                    workingTimeRange = rangeCut[1];
-                }
-                else {
-                    if (!availableRangeIterator.hasNext()) {
-                        workingTimeRange = null;
-                        break eventIteration;
-                    }
-
-                    workingTimeRange = availableRangeIterator.next();
-                }
-            }
-        }
-
-        while (workingTimeRange != null) {
-            optionalResult.add(workingTimeRange);
-
-            if (availableRangeIterator.hasNext()) {
-                workingTimeRange = availableRangeIterator.next();
-            }
-            else {
-                workingTimeRange = null;
-            }
-        }
-
-        return optionalResult;
-    }
-
-    private TimeRange[] handleOverlap(TimeRange eventRange,
-            TimeRange workingRange, long duration) {
-        TimeRange[] returnRange = new TimeRange[2];
-
-        if (eventRange.contains(workingRange)) {
-            return returnRange;
-        }
-        else if (workingRange.contains(eventRange)) {
-            TimeRange before = TimeRange.fromStartEnd(workingRange.start(),
-                eventRange.start(), false);
-            TimeRange after = TimeRange.fromStartEnd(eventRange.end(),
-                workingRange.end(), false);
-
-            if (before.duration() >= duration) {
-                returnRange[0] = before;
-            }
-            if (after.duration() >= duration) {
-                returnRange[1] = after;
-            }
-        }
-        else if (workingRange.start() < eventRange.start()) {
-            TimeRange trimRange = TimeRange.fromStartEnd(workingRange.start(),
-                eventRange.start(), false);
-
-            if (trimRange.duration() >= duration) {
-                returnRange[0] = trimRange;
-            }
-        }
-        else {
-            TimeRange trimRange = TimeRange.fromStartEnd(eventRange.end(),
-                workingRange.end(), false);
-
-            if (trimRange.duration() >= duration) {
-                returnRange[1] = trimRange;
             }
         }
 
         return returnRange;
     }
 
-    private void checkEvents(Collection<Event> events,
-            Collection<String> guestList, Collection<String> optionalList) {
+    private int cascadeLeft(Range startRange) {
+        Range breakRange = partitionedRanges.get(0);
+
+        for (int i = startRange.index; i >= 0; i--) {
+            Range currentRange = partitionedRanges.get(i);
+
+            if (!currentRange.mandatoryAvailable) {
+                breakRange = partitionedRanges.get(i + 1);
+                break;
+            }
+
+            if (!currentRange.attendees.containsAll(startRange.attendees)) {
+                breakRange = partitionedRanges.get(i + 1);
+                break;
+            }
+        }
+
+        return breakRange.timeRange.start();
+    }
+
+    private int cascadeRight(Range startRange) {
+        Range breakRange = partitionedRanges.get(partitionedRanges.size() - 1);
+
+        for (int i = startRange.index; i < partitionedRanges.size(); i++) {
+            Range currentRange = partitionedRanges.get(i);
+
+            if (!currentRange.mandatoryAvailable) {
+                breakRange = partitionedRanges.get(i - 1);
+                break;
+            }
+
+            if (!currentRange.attendees.containsAll(startRange.attendees)) {
+                breakRange = partitionedRanges.get(i - 1);
+                break;
+            }
+        }
+
+        return breakRange.timeRange.end();
+    }
+
+    private Collection<String> getFreeAttendees(
+            Collection<String> mandatoryList,
+            Collection<String> optionalList) {
+
+        ArrayList<String> returnList = new ArrayList<String>();
+
+        for (String attendee : mandatoryList) {
+            if (mandatoryAttendees.get(attendee) > 0) {
+                return null;
+            }
+        }
+
+        for (String attendee : optionalList) {
+            if (optionalAttendees.get(attendee) == 0) {
+                returnList.add(attendee);
+            }
+        }
+
+        return returnList;
+    }
+
+    private void updateAttendeeCounter(Event event, boolean add) {
+        int change = add ? 1 : -1;
+
+        for (String attendee : event.getAttendees()) {
+            if (optionalAttendees.containsKey(attendee)) {
+                optionalAttendees.put(attendee,
+                    optionalAttendees.get(attendee) + change);
+            }
+            else if (mandatoryAttendees.containsKey(attendee)) {
+                mandatoryAttendees.put(attendee,
+                    mandatoryAttendees.get(attendee) + change);
+            }
+        }
+    }
+
+    private void initializeHashmap(Collection<String> mandatoryAttendeesList,
+            Collection<String> optionalAttendeesList) {
+        optionalAttendees = new HashMap<String, Integer>();
+        mandatoryAttendees = new HashMap<String, Integer>();
+
+        for (String attendee : mandatoryAttendeesList) {
+            mandatoryAttendees.put(attendee, 0);
+        }
+
+        for (String attendee : optionalAttendeesList) {
+            optionalAttendees.put(attendee, 0);
+        }
+    }
+
+    private void preprocessEvents(Collection<Event> events,
+            Collection<String> mandatoryAttendees,
+            Collection<String> optionalAttendees) {
 
         for (Event event : events) {
-            Collection<String> eventGuestList = event.getAttendees();
-            boolean hasAttendee = false;
-            boolean hasOptionalAttendee = false;
+            Collection<String> currentEventAttendees = event.getAttendees();
 
-            for (String guest : eventGuestList) {
-                if (guestList.contains(guest)) {
-                    hasAttendee = true;
-                }
-                if (optionalList.contains(guest)) {
-                    hasOptionalAttendee = true;
-                }
-            }
+            for (String attendee : currentEventAttendees) {
+                if (mandatoryAttendees.contains(attendee) ||
+                    optionalAttendees.contains(attendee)) {
 
-            if (hasAttendee) {
-                eventQueue.add(event);
+                    EventPoint currentEventStart = new EventPoint(event,
+                        EventPoint.POINT_TYPE_START);
+                    EventPoint currentEventEnd = new EventPoint(event,
+                        EventPoint.POINT_TYPE_END);
+
+                    pointList.add(currentEventStart);
+                    pointList.add(currentEventEnd);
+                }
             }
-            else if (hasOptionalAttendee) {
-                guestEventQueue.add(event);
+        }
+
+        pointList.add(new EventPoint(TimeRange.END_OF_DAY + 1,
+            EventPoint.POINT_TYPE_END));
+
+        pointList.sort(CHRONOLOGICAL_ORDER);
+    }
+
+    private class Range {
+        boolean mandatoryAvailable;
+        TimeRange timeRange;
+        Collection<String> attendees;
+        int index;
+
+        public Range(boolean mandatoryAvailable, TimeRange timeRange,
+                Collection<String> attendees, int index) {
+            this.mandatoryAvailable = mandatoryAvailable;
+            this.timeRange = timeRange;
+            this.attendees = attendees;
+            this.index = index;
+        }
+    }
+
+    private class EventPoint {
+
+        static final int POINT_TYPE_START = 0;
+        static final int POINT_TYPE_END = 1;
+
+        Event event;
+        int time;
+        int pointType;
+
+        public EventPoint(Event event, int pointType) {
+            this.event = event;
+            this.pointType = pointType;
+
+            if (pointType == POINT_TYPE_START) {
+                time = event.getWhen().start();
             }
+            else if (pointType == POINT_TYPE_END) {
+                time = event.getWhen().end();
+            }
+        }
+
+        public EventPoint(int time, int pointType) {
+            this.event = null;
+            this.time = time;
+            this.pointType = pointType;
         }
     }
 }
