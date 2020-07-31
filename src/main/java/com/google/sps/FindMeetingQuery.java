@@ -15,6 +15,7 @@
 package com.google.sps;
 
 import java.util.Collection;
+import java.util.List;
 import java.util.ArrayList;
 import java.util.PriorityQueue;
 import java.util.Comparator;
@@ -103,7 +104,7 @@ public final class FindMeetingQuery {
         }
         finalList.sort(TimeRange.ORDER_BY_START);
 
-        ArrayList<TimeRange> removeDuplicates = new ArrayList<TimeRange>();
+        List<TimeRange> removeDuplicates = new ArrayList<TimeRange>();
 
         TimeRange lastAdded = null;
         for (TimeRange timeRange : finalList) {
